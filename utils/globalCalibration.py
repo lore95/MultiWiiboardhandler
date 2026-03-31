@@ -1,9 +1,9 @@
 import serial
+import serial.tools.list_ports
 import re
 import time
 import threading
 import csv
-import glob
 import sys
 import statistics
 import numpy as np
@@ -13,12 +13,56 @@ import matplotlib.pyplot as plt  # Optional: enable if you want plots
 
 SYNC_RE = re.compile(r'^SYNC:([^:]+):(\d+)\s*$')
 
-def find_usbmodem_port():
-    ports = glob.glob('/dev/tty.usbmodem*')
+def find_serial_port():
+    ports = list(serial.tools.list_ports.comports())
+
     if not ports:
-        print("No USB modem device found.")
+        print("No serial device found.")
         sys.exit(1)
-    return ports[0]
+
+    candidates = []
+
+    for p in ports:
+        device = p.device or ""
+        description = p.description or ""
+        hwid = p.hwid or ""
+
+        score = 0
+
+        # macOS Arduino-style names
+        if "usbmodem" in device.lower():
+            score += 5
+        if "usbserial" in device.lower():
+            score += 4
+
+        # Windows COM ports
+        if device.upper().startswith("COM"):
+            score += 2
+
+        # Helpful descriptor matches
+        text = f"{device} {description} {hwid}".lower()
+        if "arduino" in text:
+            score += 5
+        if "cp210" in text or "ch340" in text or "ftdi" in text:
+            score += 4
+        if "usb" in text:
+            score += 1
+
+        candidates.append((score, p))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    best_score, best_port = candidates[0]
+
+    if best_score == 0:
+        print("Could not confidently identify the board. Available ports:")
+        for _, p in candidates:
+            print(f"  {p.device} - {p.description}")
+        print("\nUsing the first available port.")
+    else:
+        print(f"Using serial port: {best_port.device} ({best_port.description})")
+
+    return best_port.device
 
 def get_device_name_from_sync(ser, timeout=2.0):
     try:
@@ -45,7 +89,6 @@ def get_device_name_from_sync(ser, timeout=2.0):
     return "UNKNOWN_DEVICE"
 
 def record_data(prompt_msg, ser):
-
     data_buffer = []
     stop_event = threading.Event()
     buffer_lock = threading.Lock()
@@ -64,10 +107,10 @@ def record_data(prompt_msg, ser):
                 m = line_re.match(line)
                 if not m:
                     continue
+
                 t_ms = int(m.group(1))
                 raw_values = [float(m.group(i)) for i in range(2, 6)]
 
-                # Update history and apply median
                 smoothed_values = []
                 for i in range(4):
                     history[i].append(raw_values[i])
@@ -79,6 +122,7 @@ def record_data(prompt_msg, ser):
 
                 with buffer_lock:
                     data_buffer.append([t_ms] + smoothed_values)
+
             except Exception:
                 continue
 
@@ -102,6 +146,7 @@ def record_data(prompt_msg, ser):
 def calculateChannelMean(data):
     if not data:
         return [float('nan')] * 4
+
     v1s = [row[1] for row in data]
     v2s = [row[2] for row in data]
     v3s = [row[3] for row in data]
@@ -109,21 +154,21 @@ def calculateChannelMean(data):
     return [statistics.fmean(vs) for vs in (v1s, v2s, v3s, v4s)]
 
 def calculateMean(data):
-    """Return the average of the four channel means (i.e., (m1+m2+m3+m4)/4)."""
+    """Return the average of the four channel means."""
     ch_means = calculateChannelMean(data)
     return statistics.fmean(ch_means), ch_means
 
 # ----------------- Session -----------------
 
-# Open serial
 ser = serial.Serial(
-    port=find_usbmodem_port(),
-    baudrate=9600,
+    port=find_serial_port(),
+    baudrate=9600,  # change to 115200 if your firmware uses Serial.begin(115200)
     parity=serial.PARITY_NONE,
     stopbits=serial.STOPBITS_ONE,
     bytesize=serial.EIGHTBITS,
     timeout=1
 )
+
 device_name = get_device_name_from_sync(ser)
 
 os.makedirs("calibrationWeight", exist_ok=True)
@@ -134,7 +179,6 @@ baseline_overall, baseline_ch_means = calculateMean(baseline_data)
 print(f"Baseline channel means: {', '.join(f'{m:.2f}' for m in baseline_ch_means)}")
 print(f"Baseline overall mean (avg of 4): {baseline_overall:.2f}\n")
 
-# First weight (centered)
 weight_kg = float(input("Place the FIRST known weight (kg) at the center of the 4 sensors: "))
 weight_N = weight_kg * 9.81
 first_data = record_data(f"Recording for {weight_kg:.2f} kg... Press Enter when stable.\n", ser)
@@ -142,15 +186,14 @@ first_overall, first_ch_means = calculateMean(first_data)
 print(f"Channel means: {', '.join(f'{m:.2f}' for m in first_ch_means)}")
 print(f"Overall mean (avg of 4): {first_overall:.2f}\n")
 
-# Arrays to save
 forces = [0.0, weight_N]
 avg_means = [baseline_overall, first_overall]
 
-# More weights
 while True:
     entry = input("Enter another weight in kg (centered) — or press Enter to finish: ").strip()
     if not entry:
         break
+
     try:
         w_kg = float(entry)
         w_N = w_kg * 9.81
@@ -165,7 +208,6 @@ while True:
 
 ser.close()
 
-# Save CSV (AVG-based)
 filename = f"calibrationWeight/{device_name}_AVG_calibration.csv"
 with open(filename, 'w', newline='') as f:
     writer = csv.writer(f)
