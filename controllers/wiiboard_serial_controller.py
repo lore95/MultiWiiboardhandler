@@ -2,23 +2,30 @@ import re
 import time
 import threading
 import csv
-import glob
 import sys
 import os
 from datetime import datetime
 
 import numpy as np
 import serial
+from serial.tools import list_ports
 
-CAL_DIR = "calibrationWeight"
+
 MAX_DEVICES = 4
-SAVE_DIR = "Readings"
 BAUDRATE = 115200
 SYNC_RE = re.compile(r"^SYNC:([^:]+):(\d+)\s*$")
 BASELINE_SECONDS = 2.0
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CAL_DIR = os.path.join(BASE_DIR, "calibrationWeight")
+SAVE_DIR = os.path.join(BASE_DIR, "Readings")
+
 
 def load_calibration_slope(cal_dir, cal_filename=None):
+    if not os.path.isdir(cal_dir):
+        print(f"Calibration directory not found: {cal_dir}")
+        sys.exit(1)
+
     target_path = None
 
     if cal_filename:
@@ -49,7 +56,7 @@ def load_calibration_slope(cal_dir, cal_filename=None):
             sys.exit(1)
 
     forces, avg_raws = [], []
-    with open(target_path, newline="") as f:
+    with open(target_path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         header = next(reader, None)
         force_idx, raw_idx = 0, 1
@@ -85,17 +92,13 @@ def load_calibration_slope(cal_dir, cal_filename=None):
 
 
 def list_serial_devices():
-    candidates = []
-    candidates += glob.glob("/dev/tty.usbmodem*")
-    candidates += glob.glob("/dev/cu.usbmodem*")
-    candidates += glob.glob("/dev/tty.usbserial*")
-    candidates += glob.glob("/dev/cu.usbserial*")
-    candidates += glob.glob("/dev/ttyACM*")
-    candidates += glob.glob("/dev/ttyUSB*")
-    candidates += [f"COM{i}" for i in range(1, 257)]
+    ports = []
+    for p in list_ports.comports():
+        ports.append(p.device)
 
-    uniq, seen = [], set()
-    for p in candidates:
+    uniq = []
+    seen = set()
+    for p in ports:
         if p not in seen:
             uniq.append(p)
             seen.add(p)
@@ -104,7 +107,7 @@ def list_serial_devices():
 
 def try_open_serial(port):
     try:
-        return serial.Serial(
+        ser = serial.Serial(
             port=port,
             baudrate=BAUDRATE,
             parity=serial.PARITY_NONE,
@@ -112,13 +115,24 @@ def try_open_serial(port):
             bytesize=serial.EIGHTBITS,
             timeout=1,
         )
-    except Exception:
+        time.sleep(1.5)
+        try:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+        except Exception:
+            pass
+        return ser
+    except Exception as e:
+        print(f"[{port}] open failed: {e}")
         return None
 
 
 def find_calibration_file(cal_dir, device_name):
+    if not os.path.isdir(cal_dir):
+        return None
+
     for fname in os.listdir(cal_dir):
-        if device_name.lower() in fname.lower() and fname.endswith(".csv"):
+        if device_name.lower() in fname.lower() and fname.lower().endswith(".csv"):
             return os.path.join(cal_dir, fname)
     return None
 
@@ -177,7 +191,9 @@ class DeviceController:
     def __init__(self, port, ser, board_info):
         self.port = port
         self.ser = ser
-        self.port_sanitized = port.replace("/", "_").replace("\\", "_").replace(":", "_")
+        self.port_sanitized = (
+            port.replace("/", "_").replace("\\", "_").replace(":", "_")
+        )
 
         self.board_name = board_info["board_name"]
         self.M = board_info["m_slope"]
@@ -245,7 +261,7 @@ class DeviceController:
                         continue
 
                 raw_corr = avg_raw - self.baseline_raw
-                F_total = self.M * raw_corr
+                f_total = self.M * raw_corr
 
                 raw_sum = v1 + v2 + v3 + v4
                 if raw_sum != 0:
@@ -253,11 +269,11 @@ class DeviceController:
                 else:
                     weights = [0.25, 0.25, 0.25, 0.25]
 
-                F1 = float(np.round(F_total * weights[0], 3))
-                F2 = float(np.round(F_total * weights[1], 3))
-                F3 = float(np.round(F_total * weights[2], 3))
-                F4 = float(np.round(F_total * weights[3], 3))
-                F_total_rounded = float(np.round(F_total, 3))
+                f1 = float(np.round(f_total * weights[0], 3))
+                f2 = float(np.round(f_total * weights[1], 3))
+                f3 = float(np.round(f_total * weights[2], 3))
+                f4 = float(np.round(f_total * weights[3], 3))
+                f_total_rounded = float(np.round(f_total, 3))
 
                 live_row = (
                     t_host,
@@ -266,11 +282,11 @@ class DeviceController:
                     v2,
                     v3,
                     v4,
-                    F1,
-                    F2,
-                    F3,
-                    F4,
-                    F_total_rounded,
+                    f1,
+                    f2,
+                    f3,
+                    f4,
+                    f_total_rounded,
                 )
 
                 with self.lock:
@@ -286,11 +302,11 @@ class DeviceController:
                                 v2,
                                 v3,
                                 v4,
-                                F1,
-                                F2,
-                                F3,
-                                F4,
-                                F_total_rounded,
+                                f1,
+                                f2,
+                                f3,
+                                f4,
+                                f_total_rounded,
                             )
                             self.record_buffer.append(recorded_row)
                             self.record_synced_index += 1
@@ -307,6 +323,7 @@ class DeviceController:
             self.recording_started_at = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.record_start_host_time = start_host_time
             self.record_synced_index = 0
+
         print(
             f"[{self.board_name}] Recording armed at synced host time "
             f"{start_host_time:.6f}"
@@ -322,16 +339,28 @@ class DeviceController:
             self.record_synced_index = 0
 
         os.makedirs(SAVE_DIR, exist_ok=True)
-        filename = f"{SAVE_DIR}/session_{ts}_{self.board_name}_{self.port_sanitized}.csv"
+        filename = os.path.join(
+            SAVE_DIR, f"session_{ts}_{self.board_name}_{self.port_sanitized}.csv"
+        )
 
-        with open(filename, "w", newline="") as f:
+        with open(filename, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow([
-                "host_time_s", "sample_index", "synced_index",
-                "v1_raw", "v2_raw", "v3_raw", "v4_raw",
-                "v1_force_N", "v2_force_N", "v3_force_N", "v4_force_N",
-                "total_force_N"
-            ])
+            w.writerow(
+                [
+                    "host_time_s",
+                    "sample_index",
+                    "synced_index",
+                    "v1_raw",
+                    "v2_raw",
+                    "v3_raw",
+                    "v4_raw",
+                    "v1_force_N",
+                    "v2_force_N",
+                    "v3_force_N",
+                    "v4_force_N",
+                    "total_force_N",
+                ]
+            )
             for row in rows:
                 w.writerow(list(row))
 
@@ -372,26 +401,30 @@ class WiiBoardController:
 
     def discover_and_connect(self):
         ports = list_serial_devices()
-        opened_pairs = []
+        if not ports:
+            raise RuntimeError("No COM ports found.")
 
+        print("Detected serial ports:")
         for p in ports:
-            if len(opened_pairs) >= MAX_DEVICES:
-                break
-            ser = try_open_serial(p)
-            if ser:
-                opened_pairs.append((p, ser))
-
-        if not opened_pairs:
-            raise RuntimeError("No serial devices found/available.")
+            print(f"  - {p}")
 
         valid_pairs = []
-        for port, ser in opened_pairs:
+
+        for p in ports:
+            if len(valid_pairs) >= MAX_DEVICES:
+                break
+
+            ser = try_open_serial(p)
+            if not ser:
+                continue
+
             try:
                 board_info = get_board_time_offset(ser, timeout=2.0)
-                self.available_boards[port] = board_info
-                valid_pairs.append((port, ser, board_info))
+                self.available_boards[p] = board_info
+                valid_pairs.append((p, ser, board_info))
+                print(f"[{p}] synced successfully as board '{board_info['board_name']}'")
             except Exception as e:
-                print(f"[{port}] sync failed: {e}")
+                print(f"[{p}] sync failed: {e}")
                 try:
                     ser.close()
                 except Exception:
@@ -408,6 +441,7 @@ class WiiBoardController:
 
     def start_recording(self):
         if self.is_recording:
+            print("Already recording.")
             return
 
         shared_start_host_time = time.perf_counter()
@@ -417,8 +451,11 @@ class WiiBoardController:
         for dev in self.devices:
             dev.start_recording(shared_start_host_time)
 
+        print("Recording started.")
+
     def stop_recording(self):
         if not self.is_recording:
+            print("Not currently recording.")
             return
 
         for dev in self.devices:
@@ -426,7 +463,55 @@ class WiiBoardController:
 
         self.is_recording = False
         self.recording_start_host_time = None
+        print("Recording stopped.")
 
     def close_all(self):
         for dev in self.devices:
             dev.close()
+
+
+def main():
+    print("Windows serial recorder starting...")
+    print(f"Base directory: {BASE_DIR}")
+    print(f"Calibration directory: {CAL_DIR}")
+    print(f"Save directory: {SAVE_DIR}")
+    print()
+
+    controller = WiiBoardController()
+
+    try:
+        controller.discover_and_connect()
+        print()
+        print("Commands:")
+        print("  r = start recording")
+        print("  s = stop recording and save")
+        print("  q = quit")
+        print()
+
+        while True:
+            cmd = input("Enter command [r/s/q]: ").strip().lower()
+
+            if cmd == "r":
+                controller.start_recording()
+            elif cmd == "s":
+                controller.stop_recording()
+            elif cmd == "q":
+                if controller.is_recording:
+                    controller.stop_recording()
+                break
+            else:
+                print("Unknown command.")
+
+    except KeyboardInterrupt:
+        print("\nInterrupted by user.")
+        if controller.is_recording:
+            controller.stop_recording()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+    finally:
+        controller.close_all()
+        print("All ports closed. Exiting.")
+
+
+if __name__ == "__main__":
+    main()
