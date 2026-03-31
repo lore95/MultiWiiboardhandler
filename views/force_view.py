@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, TextBox
 from matplotlib.gridspec import GridSpec
 
 from controllers.wiiboard_serial_controller import WiiBoardController
@@ -30,9 +30,9 @@ class WiiBoardView:
 
     def build(self):
         self.fig = plt.figure(figsize=(14, 9))
-        gs = GridSpec(3, 3, figure=self.fig, width_ratios=[1, 1.4, 1], height_ratios=[1, 1.2, 1])
+        gs = GridSpec(3, 3, figure=self.fig, width_ratios=[1, 1.4, 1], height_ratios=[1, 1.2, 0.4])
 
-        self.center_ax = self.fig.add_subplot(gs[:, 1])
+        self.center_ax = self.fig.add_subplot(gs[0:2, 1])
         (self.center_line,) = self.center_ax.plot([], [], label="Sum of Total Forces")
         self.center_ax.set_title("TOTAL FORCE — ALL DEVICES (SUM)")
         self.center_ax.set_xlabel("Sample Index (aligned min length)")
@@ -57,6 +57,12 @@ class WiiBoardView:
             self.device_axes.append(ax)
             self.device_lines.append(line)
 
+        self.status_text = self.fig.text(
+            0.5, 0.14, "", 
+            ha="center", va="center",
+            fontsize=11, color="green"
+        )
+
         self.record_btn_ax = self.fig.add_axes([0.18, 0.02, 0.22, 0.06])
         self.record_btn = Button(self.record_btn_ax, "Start Recording")
         self.record_btn.on_clicked(self._on_toggle_recording)
@@ -64,6 +70,14 @@ class WiiBoardView:
         self.stop_all_btn_ax = self.fig.add_axes([0.60, 0.02, 0.20, 0.06])
         self.stop_all_btn = Button(self.stop_all_btn_ax, "Stop All")
         self.stop_all_btn.on_clicked(self._on_stop_all)
+
+        # Add fields to input session name
+        self.textbox_ax = self.fig.add_axes([0.18, 0.08, 0.4, 0.05])
+        self.textbox = TextBox(self.textbox_ax, "Enter session name: ")
+
+        self.save_text_btn_ax = self.fig.add_axes([0.60, 0.08, 0.20, 0.05])
+        self.save_text_btn = Button(self.save_text_btn_ax, "Save session name")
+        self.save_text_btn.on_clicked(self._on_save_session_name)
 
         self.fig.canvas.mpl_connect(
             "key_press_event",
@@ -75,13 +89,42 @@ class WiiBoardView:
         if not self.controller.is_recording:
             self.controller.start_recording()
             self.record_btn.label.set_text("Stop Recording")
+            self._lock_session_name()
         else:
             self.controller.stop_recording()
             self.record_btn.label.set_text("Start Recording")
+            self._unlock_session_name()
         self.fig.canvas.draw_idle()
 
     def _on_stop_all(self, _evt=None):
         self.finalize()
+
+    def _on_save_session_name(self, event):
+        if self.controller.is_recording:
+            return
+        
+        text = self.textbox.text.strip()
+        self.controller.session_name = text
+        self.status_text.set_text(f"Session name set to: '{text}'")
+        self.fig.canvas.draw_idle()
+
+    def _lock_session_name(self):
+        self.textbox.set_active(False)
+        self.textbox.ax.set_alpha(0.5)
+
+        self.save_text_btn.label.set_text("No renaming while recording")
+        self.save_text_btn.ax.set_alpha(0.5)
+
+        self.fig.canvas.draw_idle()
+
+    def _unlock_session_name(self):
+        self.textbox.set_active(True)
+        self.textbox.ax.set_alpha(1.0)
+
+        self.save_text_btn.label.set_text("Save session name")
+        self.save_text_btn.ax.set_alpha(1.0)
+
+        self.fig.canvas.draw_idle()
 
     def update(self, _frame):
         for i, dev in enumerate(self.controller.devices):

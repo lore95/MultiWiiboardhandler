@@ -17,8 +17,8 @@ SYNC_RE = re.compile(r"^SYNC:([^:]+):(\d+)\s*$")
 BASELINE_SECONDS = 2.0
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CAL_DIR = os.path.join(BASE_DIR, "calibrationWeight")
-SAVE_DIR = os.path.join(BASE_DIR, "Readings")
+CAL_DIR = "C:/Users/jwi/Nico/wiiboard/MultiWiiboardhandler/calibrationWeight"
+SAVE_DIR = "C:/Users/jwi/Nico/wiiboard/MultiWiiboardhandler/Readings"
 
 
 def load_calibration_slope(cal_dir, cal_filename=None):
@@ -128,6 +128,8 @@ def try_open_serial(port):
 
 
 def find_calibration_file(cal_dir, device_name):
+    print("directory di ricerca " + cal_dir)
+    print("nome device di ricerca " + device_name)
     if not os.path.isdir(cal_dir):
         return None
 
@@ -316,13 +318,14 @@ class DeviceController:
             except Exception as e:
                 print(f"[{self.board_name}] Read error: {e}")
 
-    def start_recording(self, start_host_time):
+    def start_recording(self, start_host_time, session_name):
         with self.lock:
             self.record_buffer = []
             self.is_recording = True
             self.recording_started_at = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.record_start_host_time = start_host_time
             self.record_synced_index = 0
+            self.session_name = session_name
 
         print(
             f"[{self.board_name}] Recording armed at synced host time "
@@ -339,9 +342,16 @@ class DeviceController:
             self.record_synced_index = 0
 
         os.makedirs(SAVE_DIR, exist_ok=True)
-        filename = os.path.join(
-            SAVE_DIR, f"session_{ts}_{self.board_name}_{self.port_sanitized}.csv"
-        )
+        try:
+            print("Session name found")
+            filename = os.path.join(
+                SAVE_DIR, f"{self.session_name}_session_{ts}_{self.board_name}_{self.port_sanitized}.csv"
+            )
+        except:
+                print("Session name doesn't exist")
+                filename = os.path.join(
+                SAVE_DIR, f"session_{ts}_{self.board_name}_{self.port_sanitized}.csv"
+            )
 
         with open(filename, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -398,6 +408,7 @@ class WiiBoardController:
         self.devices = []
         self.is_recording = False
         self.recording_start_host_time = None
+        self.session_name = ""
 
     def discover_and_connect(self):
         ports = list_serial_devices()
@@ -449,9 +460,9 @@ class WiiBoardController:
         self.is_recording = True
 
         for dev in self.devices:
-            dev.start_recording(shared_start_host_time)
+            dev.start_recording(shared_start_host_time, self.session_name)
 
-        print("Recording started.")
+        print(f"Recording started with session: {self.session_name}")
 
     def stop_recording(self):
         if not self.is_recording:
