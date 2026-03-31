@@ -421,6 +421,7 @@ class WiiBoardController:
 
         valid_pairs = []
 
+        print("Detected serial ports:")
         for p in ports:
             if len(valid_pairs) >= MAX_DEVICES:
                 break
@@ -463,6 +464,8 @@ class WiiBoardController:
             dev.start_recording(shared_start_host_time, self.session_name)
 
         print(f"Recording started with session: {self.session_name}")
+
+        print("Recording started.")
 
     def stop_recording(self):
         if not self.is_recording:
